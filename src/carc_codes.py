@@ -281,6 +281,77 @@ def get_all_specialty_risks_df():
     return pd.DataFrame(rows)
 
 
+def infer_denial_risks_from_data(df) -> dict[str, list[str]]:
+    """
+    Infer likely denial categories for each specialty based on actual
+    procedure mix in the data.
+
+    Logic:
+    - High % of J-codes (drugs) → Bundling, Medical Necessity
+    - High % of surgical codes (2xxxx-6xxxx) → Prior Auth, Medical Necessity
+    - High % of E/M codes (992xx) → Coding/Modifier Errors
+    - High % of imaging (7xxxx) → Prior Auth, Coverage/Eligibility
+    - High allowed_gap → Medical Necessity, Prior Auth Missing
+    """
+    import pandas as pd
+
+    results = {}
+
+    for specialty, grp in df.groupby("specialty"):
+        if "procedure_code" not in grp.columns:
+            continue
+
+        codes = grp["procedure_code"].fillna("")
+        total = len(codes)
+        if total == 0:
+            continue
+
+        # Categorize procedures
+        j_pct = (codes.str.startswith("J")).sum() / total
+        surgical_pct = (codes.str.match(r"^[2-6]\d{4}")).sum() / total
+        em_pct = (codes.str.startswith("992")).sum() / total
+        imaging_pct = (codes.str.startswith("7")).sum() / total
+
+        # Allowed gap signal
+        avg_allowed_gap = grp["allowed_gap_pct"].mean() if "allowed_gap_pct" in grp.columns else 0
+
+        risks = []
+
+        # High drug injection volume → bundling and medical necessity
+        if j_pct > 0.15:
+            risks.append("Bundling")
+            risks.append("Medical Necessity")
+
+        # High surgical volume → prior auth
+        if surgical_pct > 0.3:
+            risks.append("Prior Auth Missing")
+            if "Medical Necessity" not in risks:
+                risks.append("Medical Necessity")
+
+        # High E/M volume → coding errors
+        if em_pct > 0.2:
+            risks.append("Coding/Modifier Errors")
+
+        # High imaging → prior auth, coverage
+        if imaging_pct > 0.15:
+            if "Prior Auth Missing" not in risks:
+                risks.append("Prior Auth Missing")
+            risks.append("Coverage/Eligibility")
+
+        # High allowed gap → medical necessity
+        if avg_allowed_gap > 3.0:
+            if "Medical Necessity" not in risks:
+                risks.insert(0, "Medical Necessity")
+
+        # Default if nothing triggered
+        if not risks:
+            risks = ["Fee Schedule", "Coverage/Eligibility"]
+
+        results[specialty] = risks[:3]  # top 3
+
+    return results
+
+
 def get_all_codes_df():
     """Return all CARC codes as a pandas DataFrame for dashboard use."""
     import pandas as pd

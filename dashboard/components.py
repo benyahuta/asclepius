@@ -519,6 +519,52 @@ def render_risk_by_specialty(df: pd.DataFrame):
     st.plotly_chart(fig, use_container_width=True)
 
 
+def render_model_metrics(metrics: dict, metadata: dict):
+    """Render model evaluation metrics as KPI cards."""
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("ROC-AUC", f"{metrics['roc_auc']:.3f}",
+                help="Area under ROC curve. 1.0 = perfect, 0.5 = random. Above 0.7 is useful.")
+    col2.metric("Accuracy", f"{metrics['accuracy']:.1%}")
+    col3.metric("Precision", f"{metrics['precision']:.1%}",
+                help="Of claims the model flags as high-risk, what % actually are.")
+    col4.metric("Recall", f"{metrics['recall']:.1%}",
+                help="Of actual high-risk claims, what % does the model catch.")
+    col5.metric("F1 Score", f"{metrics['f1']:.3f}")
+
+
+def render_feature_importances(importances: list[tuple[str, float]]):
+    """Horizontal bar chart of feature importances from the trained model."""
+    imp_df = pd.DataFrame(importances, columns=["Feature", "Importance"])
+    imp_df = imp_df.sort_values("Importance", ascending=True)
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=imp_df["Importance"],
+        y=imp_df["Feature"],
+        orientation="h",
+        marker_color=[
+            COLORS["danger"] if imp > 0.15 else
+            COLORS["warning"] if imp > 0.10 else
+            COLORS["secondary"]
+            for imp in imp_df["Importance"]
+        ],
+        hovertemplate="<b>%{y}</b><br>Importance: %{x:.4f}<extra></extra>",
+    ))
+
+    fig.update_layout(
+        height=300,
+        xaxis_title="Feature Importance (Mean Decrease in Impurity)",
+        yaxis_title="",
+        margin=dict(l=10, r=10, t=10, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(gridcolor="rgba(128,128,128,0.15)"),
+        yaxis=dict(gridcolor="rgba(128,128,128,0.15)"),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def render_carc_reference_table(carc_df: pd.DataFrame):
     """Render the CARC code reference with actionable insights."""
     for _, row in carc_df.iterrows():

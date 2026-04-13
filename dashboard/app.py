@@ -21,13 +21,21 @@ from src.analysis import (
     compute_risk_scores,
     risk_score_summary,
 )
+from src.model import train_model
 from src.anomaly import (
     detect_specialty_anomalies,
     detect_procedure_anomalies_within_specialty,
     detect_geographic_anomalies,
     generate_anomaly_alerts,
 )
-from src.carc_codes import get_all_codes_df, get_specialty_carc_risks, get_all_specialty_risks_df
+from src.carc_codes import (
+    get_all_codes_df,
+    get_specialty_carc_risks,
+    get_all_specialty_risks_df,
+    infer_denial_risks_from_data,
+    DENIAL_CATEGORIES,
+    CARC_CODES,
+)
 from dashboard.components import (
     render_key_findings,
     render_kpi_cards,
@@ -40,6 +48,8 @@ from dashboard.components import (
     render_carc_reference_table,
     render_risk_score_distribution,
     render_risk_by_specialty,
+    render_model_metrics,
+    render_feature_importances,
 )
 
 
@@ -160,18 +170,22 @@ if filtered_df.empty:
 # ── Main content ──────────────────────────────────────────────────────
 st.title("Medicare Denial Pattern Analysis")
 st.markdown(
-    "Real CMS claims data analyzed for payment adjustment patterns across "
-    "specialties, procedures, and regions. These are the same signals an "
-    "AI RCM system uses to prevent denials before they happen."
+    "Real CMS claims data analyzed to surface the payment adjustment signals "
+    "an AI RCM system needs to predict and prevent denials. Two layers of "
+    "analysis: **contractual gaps** (chargemaster vs. Medicare payment) for "
+    "relative specialty/procedure ranking, and **allowed-to-payment gaps** "
+    "(what Medicare approved vs. what it actually paid) as a direct "
+    "underpayment signal."
 )
 
 st.markdown(
     '<div class="context-note">'
-    "<strong>Reading this data:</strong> Medicare providers typically bill at "
-    "chargemaster rates 2-5x above what Medicare pays, so payment gaps of "
-    "60-80% are <em>normal</em>. The value is in <strong>relative comparison</strong> — "
-    "which specialties, procedures, or states have gaps significantly "
-    "above or below their peers. That deviation is the denial signal."
+    "<strong>Two metrics, two purposes:</strong> "
+    "(1) <strong>Chargemaster gap</strong> (60-80% is normal) — useful only for "
+    "<em>relative</em> comparison between specialties, procedures, and states. "
+    "(2) <strong>Allowed-to-payment gap</strong> — when Medicare pays less than "
+    "it approved, that's a direct signal of adjustments, partial denials, or "
+    "downcoding. The ML model on the Prediction tab targets this signal."
     "</div>",
     unsafe_allow_html=True,
 )
@@ -199,7 +213,7 @@ tab1, tab2, tab3, tab7, tab4, tab5, tab6 = st.tabs([
     "By Specialty",
     "By Procedure",
     "By Geography",
-    "Risk Scoring",
+    "Prediction Model",
     "Anomaly Alerts",
     "Deep Dive",
     "CARC Reference",
@@ -271,41 +285,67 @@ with tab3:
                 hide_index=True,
             )
 
-# ── Tab 7: Risk Scoring ─────────────────────────────────────────────
+# ── Tab 7: Prediction Model ─────────────────────────────────────────
 with tab7:
-    st.header("Composite Denial Risk Score")
+    st.header("Denial Risk Prediction Model")
     st.markdown(
-        "A multi-factor risk score (0-100) combining payment gap percentile, "
-        "specialty deviation, geographic deviation, and place-of-service patterns. "
-        "This is the kind of **feature engineering** an AI denial prediction model "
-        "would use as input — not a single metric, but a composite signal "
-        "weighted by predictive value."
+        "A Random Forest classifier trained on this dataset to predict which "
+        "provider-procedure combinations will have high allowed-to-payment gaps — "
+        "the closest proxy to actual denials in public CMS data. "
+        "This is a proof-of-concept for the kind of model an AI RCM system "
+        "would run in production, with real remittance data as the target instead."
     )
 
-    st.markdown(
-        '<div class="context-note">'
-        "<strong>Score components:</strong> "
-        "Payment gap percentile (40%) + Specialty deviation (25%) + "
-        "Geographic deviation (20%) + Place-of-service risk (15%). "
-        "Weights reflect published denial rate research on predictive signal strength."
-        "</div>",
-        unsafe_allow_html=True,
-    )
+    @st.cache_data(ttl=3600)
+    def get_model_results(_df):
+        return train_model(_df)
 
-    rcol1, rcol2, rcol3 = st.columns(3)
-    rcol1.metric("Avg Risk Score", f"{stats['avg_risk_score']:.0f}/100")
-    rcol2.metric("High-Risk Claims (≥75)", f"{stats['high_risk_pct']:.1f}%")
-    rcol3.metric("Highest-Risk Specialty", stats["highest_risk_specialty"])
+    with st.spinner("Training model..."):
+        model_results = get_model_results(filtered_df)
 
-    st.markdown("---")
-    st.subheader("Claims by Risk Tier")
-    st.markdown("How claims distribute across risk levels. The goal of an AI RCM system is to shift volume from right to left.")
-    render_risk_score_distribution(scored_df)
+    if "error" in model_results:
+        st.error(model_results["error"])
+    else:
+        meta = model_results["metadata"]
 
-    st.markdown("---")
-    st.subheader("Risk Score by Specialty")
-    st.markdown("Which specialties have the highest composite risk. This ranks differently from raw payment gap because it incorporates geographic and place-of-service factors.")
-    render_risk_by_specialty(scored_df)
+        st.markdown(
+            '<div class="context-note">'
+            f"<strong>Model target:</strong> Binary classification — does this claim have "
+            f"an <code>{meta['gap_column']}</code> above the {meta['gap_threshold']:.1f}% "
+            f"threshold (80th percentile)? Trained on {meta['train_size']:,} rows, "
+            f"tested on {meta['test_size']:,} rows. "
+            f"Positive class rate: {meta['positive_rate']:.1f}%."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        st.subheader("Model Performance")
+        render_model_metrics(model_results["metrics"], meta)
+
+        st.markdown("---")
+        st.subheader("What Drives Denial Risk?")
+        st.markdown(
+            "Feature importances show which factors the model relies on most to "
+            "predict high-gap claims. In production, these same features would "
+            "power real-time pre-submission checks."
+        )
+        render_feature_importances(model_results["feature_importances"])
+
+        st.markdown("---")
+        st.subheader("Claims by Risk Tier")
+        st.markdown(
+            "Distribution of claims across the composite risk score. "
+            "The goal of an AI RCM system: shift volume from right (high risk) to left (low risk) "
+            "through pre-submission documentation improvement."
+        )
+        render_risk_score_distribution(scored_df)
+
+        st.markdown("---")
+        st.subheader("Risk Score by Specialty")
+        render_risk_by_specialty(scored_df)
+
+        with st.expander("Full classification report"):
+            st.code(model_results["classification_report"])
 
 # ── Tab 4: Anomaly detection ─────────────────────────────────────────
 with tab4:
@@ -420,34 +460,65 @@ with tab5:
 with tab6:
     st.header("Denial Risk by Specialty")
     st.markdown(
-        "Which denial categories are most likely to affect each specialty, "
-        "based on procedure mix, billing patterns, and published denial rate research. "
-        "This mapping is what an AI copilot would use to prioritize pre-submission checks."
+        "Two layers of analysis: **data-driven inference** from actual procedure "
+        "mix patterns in this dataset, cross-referenced with **published denial "
+        "research** from MGMA and AAPC. Where both sources agree, confidence is highest."
     )
 
-    # Specialty denial risk mapping
+    # Data-driven inference
+    inferred_risks = infer_denial_risks_from_data(filtered_df)
+
+    # Manual mapping for comparison
     spec_risk_df = get_all_specialty_risks_df()
+    manual_map = {}
     if not spec_risk_df.empty:
         for _, row in spec_risk_df.iterrows():
-            with st.expander(f"**{row['specialty']}** — Primary risk: {row['primary_risk']}"):
-                st.markdown(
-                    f"**Top denial categories:** {row['primary_risk']}, "
-                    f"{row['secondary_risk']}, {row['tertiary_risk']}"
-                )
-                st.markdown(f"**Why:** {row['notes']}")
+            manual_map[row["specialty"]] = {
+                "risks": [row["primary_risk"], row["secondary_risk"], row["tertiary_risk"]],
+                "notes": row["notes"],
+            }
 
-                # Show relevant CARC codes for the primary risk category
-                from src.carc_codes import DENIAL_CATEGORIES, CARC_CODES
-                primary_codes = DENIAL_CATEGORIES.get(row['primary_risk'], [])
-                if primary_codes:
-                    st.markdown(f"**Key CARC codes for {row['primary_risk']}:**")
-                    for code in primary_codes[:3]:
-                        info = CARC_CODES.get(code, {})
-                        if info:
-                            st.markdown(
-                                f"- **CARC-{code}:** {info.get('plain_english', '')} "
-                                f"→ *{info.get('actionable_insight', '')}*"
-                            )
+    for specialty in sorted(inferred_risks.keys()):
+        inferred = inferred_risks[specialty]
+        manual = manual_map.get(specialty)
+        manual_risks = manual["risks"] if manual else []
+
+        # Check agreement between data-driven and research-based
+        overlap = set(inferred) & set(manual_risks)
+        agreement = "High" if len(overlap) >= 2 else "Moderate" if len(overlap) >= 1 else "Low"
+        agree_color = "#38A169" if agreement == "High" else "#DD6B20" if agreement == "Moderate" else "#718096"
+
+        primary = inferred[0] if inferred else "Unknown"
+        with st.expander(f"**{specialty}** — Primary risk: {primary}"):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                st.markdown("**From data (procedure mix):**")
+                for r in inferred:
+                    st.markdown(f"- {r}")
+            with col_b:
+                st.markdown("**From published research:**")
+                for r in manual_risks:
+                    if r:
+                        st.markdown(f"- {r}")
+
+            st.markdown(
+                f"<span style='color:{agree_color}; font-weight:bold;'>"
+                f"Agreement: {agreement}</span>"
+                + (f" — {manual['notes']}" if manual else ""),
+                unsafe_allow_html=True,
+            )
+
+            # Show relevant CARC codes
+            primary_codes = DENIAL_CATEGORIES.get(primary, [])
+            if primary_codes:
+                st.markdown(f"**Key CARC codes for {primary}:**")
+                for code in primary_codes[:3]:
+                    info = CARC_CODES.get(code, {})
+                    if info:
+                        st.markdown(
+                            f"- **CARC-{code}:** {info.get('plain_english', '')} "
+                            f"→ *{info.get('actionable_insight', '')}*"
+                        )
 
     st.markdown("---")
     st.header("CARC Code Reference")
@@ -465,6 +536,51 @@ with tab6:
         carc_df = carc_df[carc_df["denial_category"] == selected_category]
 
     render_carc_reference_table(carc_df)
+
+# ── Ember integration framing ────────────────────────────────────────
+st.markdown("---")
+with st.expander("How This Connects to Ember's AI Copilot"):
+    st.markdown(
+        """
+**What this analysis demonstrates with public data:**
+
+This dashboard processes 30M+ Medicare claims through a full analytical pipeline:
+data ingestion from the CMS API, statistical analysis with volume-weighted aggregation,
+anomaly detection, and a trained Random Forest model for denial risk prediction. Every
+component is built to scale — the same architecture works on 30M claims or 300M.
+
+**What becomes possible with actual remittance data:**
+
+The key limitation of public CMS data is the absence of actual denial codes (CARCs/RARCs)
+and appeal outcomes. Ember's copilot has access to real-time remittance advice (835 files),
+which means:
+
+1. **The prediction model's target variable becomes real.** Instead of proxying denials
+through allowed-to-payment gaps, the model trains on actual CARC-coded denial outcomes.
+Same feature engineering, dramatically better signal.
+
+2. **Temporal analysis becomes possible.** With claim-level timestamps, the anomaly
+detection engine can flag *changes* — "Cardiology denials in Texas spiked 40% this
+month" — not just static outliers.
+
+3. **Pre-submission intervention at the claim level.** The specialty/procedure/geographic
+risk patterns surface here at an aggregate level. With Ember's real-time access, the
+same patterns can flag individual claims before they're submitted: "This orthopedic
+surgery claim in Wisconsin has a 73% predicted denial probability — here's what to fix."
+
+4. **The CARC mapping closes the loop.** This dashboard maps specialties to *likely*
+denial categories. With real CARC data, that mapping becomes exact — and the
+actionable insights become specific to the provider's actual denial history.
+
+**Architecture decisions that transfer directly:**
+
+- Volume-weighted aggregation (prevents small-provider bias)
+- Percentile-based thresholds (adapts to any data distribution)
+- Z-score + IQR anomaly detection (catches both normal and skewed outliers)
+- Multi-factor risk scoring (composites are more robust than single metrics)
+- Feature engineering for ML (specialty, geography, procedure category, charge magnitude)
+        """
+    )
 
 # ── Footer: methodology & export ────────────────────────────────────
 st.markdown("---")
