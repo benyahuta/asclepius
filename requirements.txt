@@ -1,0 +1,7 @@
+streamlit==1.40.0
+pandas==2.2.3
+numpy==1.26.4
+plotly==5.24.1
+requests==2.32.3
+sodapy==2.2.0
+scikit-learn==1.5.2
