@@ -1,75 +1,63 @@
-# Medicare Denial Pattern Analysis Dashboard
+# Medicare Denial Pattern Analysis
 
-An interactive dashboard that analyzes real CMS Medicare claims data to surface denial risk patterns across specialties, procedures, and geographies. Built to demonstrate how data-driven denial prevention works — the same approach used by AI-powered Revenue Cycle Management platforms.
+Analyzes 30M+ real CMS Medicare claims to predict denial risk using machine learning. Built as a proof-of-concept for AI-powered Revenue Cycle Management.
 
 ## What it does
 
-- **Specialty analysis**: Which medical specialties have the highest claim adjustment rates?
-- **Procedure risk ranking**: Which CPT/HCPCS codes are most likely to trigger denials?
-- **Geographic patterns**: How do denial rates vary by state (driven by regional MAC and LCD differences)?
-- **Anomaly detection**: Statistical alerts when a specialty, procedure, or region's denial pattern deviates significantly from baseline
-- **CARC code reference**: Plain-language explanations of every denial reason code with actionable billing guidance
+**Data pipeline:** Fetches real Medicare Provider Utilization data (2023) from the CMS Data API across 20 specialties, cleans and transforms it, computes denial-relevant metrics, and stores it as parquet.
 
-## Data source
+**Two-layer analysis:** (1) Chargemaster gap (submitted charge vs. Medicare payment) for relative specialty/procedure ranking. (2) Allowed-to-payment gap (what Medicare approved vs. what it actually paid) as a direct underpayment signal.
 
-Real Medicare Provider Utilization and Payment Data from [CMS](https://data.cms.gov). No synthetic data. The dashboard derives denial risk signals from the gap between submitted charges and Medicare payments — a direct proxy for claim adjustments, downcoding, and partial denials.
+**ML prediction model:** Random Forest classifier trained on 80K claims, tested on 20K. Achieves ROC-AUC of 0.831 predicting high allowed-to-payment gaps from 7 engineered features (procedure category, charge magnitude, place of service, specialty, geographic risk, service volume, payment ratio). Feature importances show what drives denial risk.
 
-## Setup
+**Statistical analysis:** Volume-weighted aggregation (prevents small-provider bias), percentile-based risk flagging (top 20% of gaps), z-score + IQR anomaly detection across specialties and states.
 
-```bash
-# Clone and install
-cd ember-denial-dashboard
-pip install -r requirements.txt
+**CARC denial mapping:** Data-driven inference of likely denial categories per specialty (from procedure mix analysis), cross-referenced with published MGMA/AAPC research. Agreement scoring between the two sources.
 
-# Download CMS data (takes 1-2 minutes)
-python scripts/setup_data.py
+**Interactive dashboard:** 7-tab Streamlit app with auto-generated key findings, choropleth maps showing geographic deviation, diverging bar charts, model evaluation metrics, and CSV export.
 
-# Launch dashboard
-streamlit run dashboard/app.py
-```
-
-### Options for data setup
+## Quick start
 
 ```bash
-# Fetch more data
-python scripts/setup_data.py --max-rows 500000
-
-# Fetch all specialties (not just the default set)
-python scripts/setup_data.py --all
-
-# Fetch a single specialty
-python scripts/setup_data.py --specialty "Cardiology"
+git clone https://github.com/YOUR_USERNAME/medical-denial-analysis.git
+cd medical-denial-analysis
+pip3 install -r requirements.txt
+python3 scripts/setup_data.py        # Downloads CMS data (~2 min)
+python3 -m streamlit run dashboard/app.py
 ```
 
 ## Project structure
 
 ```
-ember-denial-dashboard/
-├── config.py                  # Project configuration and CMS API settings
-├── requirements.txt
-├── data/
-│   ├── raw/                   # Raw CMS API responses (parquet)
-│   └── processed/             # Cleaned and transformed data (parquet)
+├── config.py                  # CMS API config and analysis thresholds
+├── requirements.txt           # streamlit, pandas, plotly, scikit-learn
 ├── src/
-│   ├── ingest.py              # CMS data download and transformation pipeline
-│   ├── analysis.py            # Denial pattern analysis engine
-│   ├── anomaly.py             # Statistical anomaly detection
-│   └── carc_codes.py          # CARC/RARC denial reason code reference
+│   ├── ingest.py              # CMS Data API v1 pipeline (fetch → clean → parquet)
+│   ├── analysis.py            # Volume-weighted aggregation, risk scoring, key findings
+│   ├── anomaly.py             # Z-score + IQR anomaly detection
+│   ├── model.py               # Random Forest denial risk classifier
+│   └── carc_codes.py          # CARC codes, specialty risk mapping, data-driven inference
 ├── dashboard/
-│   ├── app.py                 # Main Streamlit application
-│   └── components.py          # Reusable chart and UI components
+│   ├── app.py                 # Streamlit app (7 tabs)
+│   └── components.py          # Plotly charts, KPI cards, model visualization
 └── scripts/
-    └── setup_data.py          # One-time data setup script
+    └── setup_data.py          # CLI data download with --max-rows, --specialty args
 ```
 
-## Key concepts
+## Key technical decisions
 
-**Payment gap** = (submitted charge - Medicare payment) / submitted charge. A high gap indicates the payer is paying far less than billed, which correlates with denials, downcoding, and insufficient documentation.
+**Volume-weighted averages** instead of mean-of-means. A provider billing 10,000 claims contributes proportionally more than one billing 11. This prevents small-practice bias in specialty-level statistics.
 
-**Denial risk flag** = binary flag for claims where the payment gap exceeds 50%. These are the claims most likely to represent actual denials or significant adjustments.
+**Percentile-based denial flagging** (p80 threshold) instead of a flat cutoff. Adapts to the actual data distribution — 50% would flag 86% of Medicare claims as "high risk" since chargemaster gaps are structurally large.
 
-**CARC codes** (Claim Adjustment Reason Codes) = the standardized codes every U.S. insurer uses to explain why a claim was adjusted. The dashboard includes a curated reference of the most common codes with plain-language explanations.
+**Allowed-to-payment gap as ML target.** The chargemaster gap is a contractual discount, not a denial. The allowed-to-payment gap captures cases where Medicare paid less than it approved — a direct signal of adjustments, partial denials, and downcoding.
 
-## Why this matters for RCM
+**Feature engineering for the classifier:** procedure category (first char of HCPCS groups drugs/surgery/radiology/E&M), log-transformed charges and volume (normalizes skewed distributions), state-level average gap (captures MAC contractor behavior), place of service (facility vs. office billing differences).
 
-Revenue Cycle Management platforms like Ember AI use exactly these kinds of patterns — specialty-level denial rates, procedure-specific risk scores, geographic variation — to predict and prevent denials before claims are submitted. This dashboard demonstrates that analytical foundation using real public data.
+## Limitations
+
+This dataset does not contain actual denial codes (CARCs/RARCs) or appeal outcomes. The allowed-to-payment gap is the closest available proxy. With real remittance data (835 files), the same model architecture trains on actual denial outcomes — same features, dramatically better signal. See the "How This Connects to Ember's AI Copilot" section in the dashboard for details.
+
+## Data source
+
+[CMS Medicare Physician & Other Practitioners — Provider and Service](https://data.cms.gov) (2023 release). Accessed via CMS Data API v1. Public data, no authentication required.
