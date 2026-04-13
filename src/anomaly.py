@@ -24,6 +24,10 @@ def detect_specialty_anomalies(
 ) -> pd.DataFrame:
     """
     Flag specialties whose payment gap deviates significantly from peers.
+
+    Z-score uses the standard deviation of SPECIALTY-LEVEL means, not
+    the std of individual claims. This is the correct test: "is this
+    specialty's average unusual compared to other specialties?"
     """
     specialty_stats = df.groupby("specialty").agg(
         mean_gap=("payment_gap_pct", "mean"),
@@ -34,25 +38,31 @@ def detect_specialty_anomalies(
         procedure_count=("procedure_code", "nunique"),
     ).reset_index()
 
-    global_mean = df["payment_gap_pct"].mean()
-    global_std = df["payment_gap_pct"].std()
+    # Use the std of specialty means (group-level), NOT the std of
+    # individual claims. Row-level std (~17) makes all z-scores tiny.
+    # Group-level std (~5) correctly measures inter-specialty variation.
+    global_mean = specialty_stats["mean_gap"].mean()
+    group_std = specialty_stats["mean_gap"].std()
 
-    if global_std == 0 or np.isnan(global_std):
+    if group_std == 0 or np.isnan(group_std):
         specialty_stats["z_score"] = 0
     else:
         specialty_stats["z_score"] = (
-            (specialty_stats["mean_gap"] - global_mean) / global_std
+            (specialty_stats["mean_gap"] - global_mean) / group_std
         )
 
-    # Also compute IQR-based outlier detection (more robust)
+    # IQR-based detection scales with the threshold: at higher thresholds,
+    # the IQR multiplier increases so it doesn't bypass the slider.
+    iqr_multiplier = max(1.5, z_threshold * 0.75)
     q1 = specialty_stats["mean_gap"].quantile(0.25)
     q3 = specialty_stats["mean_gap"].quantile(0.75)
     iqr = q3 - q1
     specialty_stats["is_iqr_outlier"] = (
-        (specialty_stats["mean_gap"] < q1 - 1.5 * iqr)
-        | (specialty_stats["mean_gap"] > q3 + 1.5 * iqr)
+        (specialty_stats["mean_gap"] < q1 - iqr_multiplier * iqr)
+        | (specialty_stats["mean_gap"] > q3 + iqr_multiplier * iqr)
     )
 
+    # Both conditions must be meaningful at the chosen threshold
     specialty_stats["is_anomaly"] = (
         (specialty_stats["z_score"].abs() > z_threshold)
         | specialty_stats["is_iqr_outlier"]
@@ -96,8 +106,11 @@ def detect_procedure_anomalies_within_specialty(
     if proc_stats.empty:
         return pd.DataFrame()
 
-    specialty_mean = spec_df["payment_gap_pct"].mean()
-    specialty_std = proc_stats["mean_gap"].std()  # use procedure-level std
+    # Use the mean of procedure-level means (group-level), consistent with
+    # the group-level std. This is the correct baseline: "is this procedure's
+    # average unusual compared to other procedures in this specialty?"
+    specialty_mean = proc_stats["mean_gap"].mean()
+    specialty_std = proc_stats["mean_gap"].std()
 
     if specialty_std == 0 or np.isnan(specialty_std):
         proc_stats["z_score"] = 0
