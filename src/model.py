@@ -97,9 +97,9 @@ def prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     le_specialty = LabelEncoder()
     work["specialty_encoded"] = le_specialty.fit_transform(work["specialty"].fillna("Unknown"))
 
-    # 7. State-level risk (mean gap by state, captures MAC behavior)
-    state_means = work.groupby("state")[gap_col].mean()
-    work["state_risk"] = work["state"].map(state_means).fillna(state_means.mean())
+    # 7. State-level risk — placeholder column; actual values are computed
+    #    AFTER the train/test split to prevent data leakage (see train_model).
+    work["state_risk"] = 0.0
 
     # 8. Procedure category encoded
     le_proc = LabelEncoder()
@@ -124,6 +124,7 @@ def prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     X.attrs["feature_names"] = feature_cols
     X.attrs["gap_threshold"] = threshold
     X.attrs["gap_column"] = gap_col
+    X.attrs["state_series"] = work["state"]
 
     return X, y
 
@@ -153,6 +154,27 @@ def train_model(df: pd.DataFrame) -> dict:
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
+
+    # Compute state_risk from TRAINING data only to prevent data leakage.
+    # Uses claim-volume-weighted means so high-volume providers dominate.
+    state_series = X.attrs.get("state_series")
+    gap_col = X.attrs.get("gap_column", "allowed_gap_pct")
+    if state_series is not None:
+        train_states = state_series.loc[X_train.index]
+        train_gaps = df.loc[X_train.index, gap_col]
+        train_volumes = df.loc[X_train.index, "total_services"]
+
+        # Weighted mean per state from training data only
+        _num = (train_gaps * train_volumes).groupby(train_states).sum()
+        _den = train_volumes.groupby(train_states).sum()
+        state_means_train = (_num / _den.replace(0, np.nan)).fillna(0)
+        fallback = (train_gaps * train_volumes).sum() / train_volumes.sum()
+
+        all_states = state_series.loc[X.index]
+        X_train = X_train.copy()
+        X_test = X_test.copy()
+        X_train["state_risk"] = all_states.loc[X_train.index].map(state_means_train).fillna(fallback)
+        X_test["state_risk"] = all_states.loc[X_test.index].map(state_means_train).fillna(fallback)
 
     # Train
     model = RandomForestClassifier(

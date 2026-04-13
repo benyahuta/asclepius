@@ -229,7 +229,7 @@ with tab1:
     )
 
     spec_df = denial_rate_by_specialty(filtered_df)
-    render_specialty_bar_chart(spec_df)
+    render_specialty_bar_chart(spec_df, dataset_avg=dataset_avg_gap)
 
     with st.expander("View raw data"):
         st.dataframe(spec_df, use_container_width=True, hide_index=True)

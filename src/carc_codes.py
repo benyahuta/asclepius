@@ -302,18 +302,22 @@ def infer_denial_risks_from_data(df) -> dict[str, list[str]]:
             continue
 
         codes = grp["procedure_code"].fillna("")
-        total = len(codes)
+        volumes = grp["total_services"]
+        total = volumes.sum()
         if total == 0:
             continue
 
-        # Categorize procedures
-        j_pct = (codes.str.startswith("J")).sum() / total
-        surgical_pct = (codes.str.match(r"^[2-6]\d{4}")).sum() / total
-        em_pct = (codes.str.startswith("992")).sum() / total
-        imaging_pct = (codes.str.startswith("7")).sum() / total
+        # Categorize procedures weighted by claim volume
+        j_pct = volumes[codes.str.startswith("J")].sum() / total
+        surgical_pct = volumes[codes.str.match(r"^[2-6]\d{4}")].sum() / total
+        em_pct = volumes[codes.str.startswith("992")].sum() / total
+        imaging_pct = volumes[codes.str.startswith("7")].sum() / total
 
-        # Allowed gap signal
-        avg_allowed_gap = grp["allowed_gap_pct"].mean() if "allowed_gap_pct" in grp.columns else 0
+        # Allowed gap signal (claim-volume-weighted)
+        if "allowed_gap_pct" in grp.columns:
+            avg_allowed_gap = (grp["allowed_gap_pct"] * volumes).sum() / total
+        else:
+            avg_allowed_gap = 0
 
         risks = []
 

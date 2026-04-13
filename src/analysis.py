@@ -438,7 +438,14 @@ def summary_statistics(df: pd.DataFrame) -> dict:
     total_procedures = df["procedure_code"].nunique()
 
     avg_gap = _weighted_avg(df, "payment_gap_pct", "total_services")
-    median_gap = df["payment_gap_pct"].median()
+    # Weighted median: expand rows by volume and take median.
+    # Use numpy for efficiency instead of literal expansion.
+    sorted_idx = df["payment_gap_pct"].argsort()
+    sorted_gaps = df["payment_gap_pct"].iloc[sorted_idx].values
+    sorted_weights = df["total_services"].iloc[sorted_idx].values
+    cum_weights = np.cumsum(sorted_weights)
+    half = cum_weights[-1] / 2.0
+    median_gap = float(sorted_gaps[np.searchsorted(cum_weights, half)])
 
     # Use allowed-to-payment gap for revenue at risk (more meaningful)
     total_at_risk = df["total_revenue_at_risk"].sum()

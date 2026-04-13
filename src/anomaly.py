@@ -16,6 +16,12 @@ detection for robustness against skewed distributions.
 import pandas as pd
 import numpy as np
 from config import ANOMALY_Z_THRESHOLD
+from src.analysis import _weighted_avg
+
+
+def _group_weighted_mean(group_df: pd.DataFrame) -> float:
+    """Compute claim-volume-weighted mean of payment_gap_pct for a group."""
+    return _weighted_avg(group_df, "payment_gap_pct", "total_services")
 
 
 def detect_specialty_anomalies(
@@ -25,22 +31,33 @@ def detect_specialty_anomalies(
     """
     Flag specialties whose payment gap deviates significantly from peers.
 
-    Z-score uses the standard deviation of SPECIALTY-LEVEL means, not
-    the std of individual claims. This is the correct test: "is this
+    Z-score uses the standard deviation of SPECIALTY-LEVEL weighted means,
+    not the std of individual claims. This is the correct test: "is this
     specialty's average unusual compared to other specialties?"
+
+    All per-specialty means are claim-volume-weighted to avoid mean-of-means
+    bias (a provider with 10 claims should not get equal weight to one with
+    100,000 claims).
     """
-    specialty_stats = df.groupby("specialty").agg(
-        mean_gap=("payment_gap_pct", "mean"),
+    # Compute claim-volume-weighted mean per specialty
+    weighted_means = df.groupby("specialty").apply(
+        _group_weighted_mean, include_groups=False
+    ).rename("mean_gap")
+
+    # Combine with other aggregations that don't need weighting
+    other_stats = df.groupby("specialty").agg(
         std_gap=("payment_gap_pct", "std"),
         median_gap=("payment_gap_pct", "median"),
         claim_volume=("total_services", "sum"),
         provider_count=("provider_npi", "nunique"),
         procedure_count=("procedure_code", "nunique"),
-    ).reset_index()
+    )
 
-    # Use the std of specialty means (group-level), NOT the std of
-    # individual claims. Row-level std (~17) makes all z-scores tiny.
-    # Group-level std (~5) correctly measures inter-specialty variation.
+    specialty_stats = other_stats.join(weighted_means).reset_index()
+
+    # Use the std of specialty-level weighted means (group-level), NOT the
+    # std of individual claims. Row-level std (~17) makes all z-scores tiny.
+    # Group-level std (~5-6) correctly measures inter-specialty variation.
     global_mean = specialty_stats["mean_gap"].mean()
     group_std = specialty_stats["mean_gap"].std()
 
@@ -93,12 +110,18 @@ def detect_procedure_anomalies_within_specialty(
     if spec_df.empty:
         return pd.DataFrame()
 
-    proc_stats = spec_df.groupby(["procedure_code", "procedure_description"]).agg(
-        mean_gap=("payment_gap_pct", "mean"),
+    # Compute claim-volume-weighted mean per procedure
+    weighted_means = spec_df.groupby(["procedure_code", "procedure_description"]).apply(
+        _group_weighted_mean, include_groups=False
+    ).rename("mean_gap")
+
+    other_stats = spec_df.groupby(["procedure_code", "procedure_description"]).agg(
         std_gap=("payment_gap_pct", "std"),
         claim_volume=("total_services", "sum"),
         provider_count=("provider_npi", "nunique"),
-    ).reset_index()
+    )
+
+    proc_stats = other_stats.join(weighted_means).reset_index()
 
     # Filter low-volume procedures
     proc_stats = proc_stats[proc_stats["claim_volume"] >= min_claims]
@@ -106,9 +129,10 @@ def detect_procedure_anomalies_within_specialty(
     if proc_stats.empty:
         return pd.DataFrame()
 
-    # Use the mean of procedure-level means (group-level), consistent with
-    # the group-level std. This is the correct baseline: "is this procedure's
-    # average unusual compared to other procedures in this specialty?"
+    # Use the mean of procedure-level weighted means (group-level),
+    # consistent with the group-level std. This is the correct baseline:
+    # "is this procedure's average unusual compared to other procedures
+    # in this specialty?"
     specialty_mean = proc_stats["mean_gap"].mean()
     specialty_std = proc_stats["mean_gap"].std()
 
@@ -144,11 +168,17 @@ def detect_geographic_anomalies(
     if procedure_code:
         work_df = work_df[work_df["procedure_code"] == procedure_code]
 
-    state_stats = work_df.groupby("state").agg(
-        mean_gap=("payment_gap_pct", "mean"),
+    # Compute claim-volume-weighted mean per state
+    weighted_means = work_df.groupby("state").apply(
+        _group_weighted_mean, include_groups=False
+    ).rename("mean_gap")
+
+    other_stats = work_df.groupby("state").agg(
         claim_volume=("total_services", "sum"),
         provider_count=("provider_npi", "nunique"),
-    ).reset_index()
+    )
+
+    state_stats = other_stats.join(weighted_means).reset_index()
 
     state_stats = state_stats[state_stats["claim_volume"] >= MIN_STATE_CLAIMS]
 

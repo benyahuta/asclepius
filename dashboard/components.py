@@ -135,10 +135,12 @@ def render_kpi_cards(stats: dict):
             )
 
 
-def render_specialty_bar_chart(specialty_df: pd.DataFrame):
+def render_specialty_bar_chart(specialty_df: pd.DataFrame, dataset_avg: float | None = None):
     """Horizontal bar chart of payment gap by specialty with baseline reference."""
     plot_df = specialty_df.head(20).sort_values("avg_payment_gap_pct", ascending=True)
-    overall_avg = plot_df["avg_payment_gap_pct"].mean()
+    # Use the claims-weighted dataset average passed from analysis.py,
+    # not the unweighted mean of displayed bars.
+    overall_avg = dataset_avg if dataset_avg is not None else plot_df["avg_payment_gap_pct"].mean()
 
     fig = px.bar(
         plot_df,
